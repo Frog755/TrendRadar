@@ -1,22 +1,25 @@
 name: Hot News Crawler
 
+# 触发方式保持不变
 on:
   schedule:
-    # 我们使用的是 github 官方提供的资源来进行的推送，而每个账号的资源是限额的，为了不被官方判定为滥用而面临封号的风险，不建议比半小时更低
-    - cron: "0 * * * *" # 每小时整点运行一次(实际有偏差) 或者 "*/30 * * * *" (每半小时执行一次) 或者 "*/30 0-14 * * *"(每天早上 8 点到晚上 10 点期间，每半小时运行一次)
+    # 每小时整点运行（可自行调整）
+    - cron: "0 * * * *"
   workflow_dispatch:
 
-# 添加权限设置
+# 明确给予写入权限（必须）
 permissions:
-  contents: write
+  contents: write          # 允许 checkout 和 push
+  pull-requests: write     # 允许创建 Pull Request（关键！）
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # 必须，确保能获取完整历史
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -31,19 +34,16 @@ jobs:
       - name: Verify required files
         run: |
           echo "🔍 检查必需的配置文件..."
-
           if [ ! -f config/config.yaml ]; then
             echo "❌ 错误: config/config.yaml 文件不存在"
             echo "请参考项目文档创建配置文件"
             exit 1
           fi
-
           if [ ! -f config/frequency_words.txt ]; then
             echo "❌ 错误: config/frequency_words.txt 文件不存在"
             echo "请参考项目文档创建频率词配置文件"
             exit 1
           fi
-
           echo "✅ 配置文件检查通过"
 
       - name: Run crawler
@@ -67,9 +67,38 @@ jobs:
           GITHUB_ACTIONS: true
         run: python main.py
 
-      - name: Commit and push if changes
+      # ==================== 以下为全新且永久稳定的提交方案 ====================
+
+      - name: Create new branch & commit changes
         run: |
-          git config --global user.name 'GitHub Actions'
-          git config --global user.email 'actions@github.com'
+          BRANCH="crawler-update-$(date +'%Y%m%d-%H%M%S')-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
           git add -A
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update by GitHub Actions at $(TZ=Asia/Shanghai date)" && git push)
+          
+          if git diff --staged --quiet; then
+            echo "✅ 没有文件改动，跳过提交"
+            echo "NO_CHANGES=true" >> $GITHUB_ENV
+          else
+            git commit -m "🤖 Auto crawled data update $(date '+%Y-%m-%d %H:%M:%S %Z')"
+            git push origin "$BRANCH"
+            echo "NO_CHANGES=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create Pull Request
+        if: env.NO_CHANGES != 'true'   # 只有真正有改动时才创建 PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: crawler-update-${{ github.run_id }}-${{ github.run_attempt }}
+          base: master
+          title: "🤖 热点新闻自动更新 $(date '+%Y-%m-%d %H:%M:%S')"
+          body: |
+            自动化爬虫任务已完成并生成新的数据更新
+            
+            - Workflow: #${{ github.run_number }}
+            - Run ID: ${{ github.run_id }}
+            - Trigger: ${{ github.event_name }}
+            - Time: $(date '+%Y-%m-%d %H:%M:%S %Z')
+          commit-message: "🤖 Auto crawled data update $(date '+%Y-%m-%d %H:%M:%S')"
+          labels: automated,crawler
+          delete-branch: true   # 合并后自动删除临时分支
